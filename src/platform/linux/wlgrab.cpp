@@ -91,6 +91,30 @@ namespace wl {
       }
 
       output = monitor->output;
+      selected_monitor = monitor;
+
+      // Query the output's color/HDR image description (if the compositor
+      // supports color-management). This drives is_hdr()/get_hdr_metadata().
+      if (interface[wl::interface_t::COLOR_MANAGEMENT] && interface.color_manager) {
+        monitor->listen_color(interface.color_manager);
+
+        // get_image_description -> ready -> get_information -> done spans two
+        // server round trips; cap the loop so a misbehaving compositor can't hang us.
+        for (int i = 0; i < 5 && !monitor->cm_query_complete; ++i) {
+          display.roundtrip();
+        }
+
+        // Ignore a change flag set during the initial query; we already have the latest.
+        monitor->consume_image_description_changed();
+
+        hdr = monitor->is_hdr();
+        if (hdr) {
+          hdr_metadata = monitor->hdr_metadata;
+          BOOST_LOG(info) << "[wlgrab] HDR streaming enabled for ["sv << monitor->description << ']';
+        }
+      } else {
+        BOOST_LOG(info) << "[wlgrab] Compositor does not advertise wp_color_manager_v1; HDR capture unavailable"sv;
+      }
 
       offset_x = monitor->viewport.offset_x;
       offset_y = monitor->viewport.offset_y;
@@ -140,6 +164,13 @@ namespace wl {
         }
       } while (dmabuf.status == dmabuf_t::WAITING);
 
+      // Reinitialize if the output's color/HDR state changed mid-stream so the
+      // encoder picks up the new colorspace and metadata (mirrors the KMS path).
+      if (selected_monitor && selected_monitor->consume_image_description_changed()) {
+        BOOST_LOG(info) << "[wlgrab] Reinitializing capture after HDR/color change"sv;
+        return platf::capture_e::reinit;
+      }
+
       auto current_frame = dmabuf.current_frame;
 
       if (
@@ -153,6 +184,18 @@ namespace wl {
       return platf::capture_e::ok;
     }
 
+    bool is_hdr() override {
+      return hdr;
+    }
+
+    bool get_hdr_metadata(SS_HDR_METADATA &metadata) override {
+      if (!hdr) {
+        return platf::display_t::get_hdr_metadata(metadata);
+      }
+      metadata = hdr_metadata;
+      return true;
+    }
+
     platf::mem_type_e mem_type;
 
     std::chrono::nanoseconds delay;
@@ -162,6 +205,10 @@ namespace wl {
     dmabuf_t dmabuf;
 
     wl_output *output;
+    wl::monitor_t *selected_monitor {nullptr};
+
+    bool hdr {false};
+    SS_HDR_METADATA hdr_metadata {};
   };
 
   class wlr_ram_t: public wlr_t {

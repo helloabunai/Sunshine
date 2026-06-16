@@ -121,6 +121,27 @@ namespace wl {
         &CLASS_CALL(monitor_t, xdg_done),
         &CLASS_CALL(monitor_t, xdg_name),
         &CLASS_CALL(monitor_t, xdg_description)
+      },
+      cm_output_listener {
+        .image_description_changed = &CLASS_CALL(monitor_t, cm_image_description_changed),
+      },
+      cm_image_desc_listener {
+        .failed = &CLASS_CALL(monitor_t, cm_failed),
+        .ready = &CLASS_CALL(monitor_t, cm_ready),
+        .ready2 = &CLASS_CALL(monitor_t, cm_ready2),
+      },
+      cm_info_listener {
+        .done = &CLASS_CALL(monitor_t, info_done),
+        .icc_file = &CLASS_CALL(monitor_t, info_icc_file),
+        .primaries = &CLASS_CALL(monitor_t, info_primaries),
+        .primaries_named = &CLASS_CALL(monitor_t, info_primaries_named),
+        .tf_power = &CLASS_CALL(monitor_t, info_tf_power),
+        .tf_named = &CLASS_CALL(monitor_t, info_tf_named),
+        .luminances = &CLASS_CALL(monitor_t, info_luminances),
+        .target_primaries = &CLASS_CALL(monitor_t, info_target_primaries),
+        .target_luminance = &CLASS_CALL(monitor_t, info_target_luminance),
+        .target_max_cll = &CLASS_CALL(monitor_t, info_target_max_cll),
+        .target_max_fall = &CLASS_CALL(monitor_t, info_target_max_fall),
       } {
   }
 
@@ -166,6 +187,187 @@ namespace wl {
     auto xdg_output = zxdg_output_manager_v1_get_xdg_output(output_manager, output);
     zxdg_output_v1_add_listener(xdg_output, &xdg_listener, this);
     wl_output_add_listener(output, &wl_listener, this);
+  }
+
+  // --- Color management / HDR ---
+
+  void monitor_t::listen_color(wp_color_manager_v1 *color_manager) {
+    if (!color_manager) {
+      return;
+    }
+
+    cm_query_complete = false;
+    hdr = false;
+
+    // The wp_color_management_output_v1 stays alive for the lifetime of the
+    // monitor so we keep receiving image_description_changed events. The image
+    // description itself is transient: we query it, read the info, and drop it.
+    cm_output = wp_color_manager_v1_get_output(color_manager, output);
+    wp_color_management_output_v1_add_listener(cm_output, &cm_output_listener, this);
+
+    cm_image_desc = wp_color_management_output_v1_get_image_description(cm_output);
+    wp_image_description_v1_add_listener(cm_image_desc, &cm_image_desc_listener, this);
+  }
+
+  void monitor_t::cm_image_description_changed(wp_color_management_output_v1 *) {
+    BOOST_LOG(info) << "[wayland] Output color/HDR image description changed"sv;
+    image_description_changed = true;
+  }
+
+  void monitor_t::cm_request_info(wp_image_description_v1 *image_description) {
+    // Reset accumulators before a fresh dump.
+    cm_tf = 0;
+    cm_has_primaries = false;
+    cm_has_target_primaries = false;
+    cm_has_target_luminance = false;
+    cm_lum_max = cm_lum_min = 0;
+    cm_target_lum_max = cm_target_lum_min = 0;
+    cm_max_cll = cm_max_fall = 0;
+
+    auto info = wp_image_description_v1_get_information(image_description);
+    wp_image_description_info_v1_add_listener(info, &cm_info_listener, this);
+  }
+
+  void monitor_t::cm_ready(wp_image_description_v1 *image_description, std::uint32_t) {
+    cm_request_info(image_description);
+  }
+
+  void monitor_t::cm_ready2(wp_image_description_v1 *image_description, std::uint32_t, std::uint32_t) {
+    cm_request_info(image_description);
+  }
+
+  void monitor_t::cm_failed(wp_image_description_v1 *, std::uint32_t cause, const char *msg) {
+    BOOST_LOG(warning) << "[wayland] Output image description unavailable (cause "sv << cause << "): "sv << (msg ? msg : "");
+    hdr = false;
+    cm_query_complete = true;
+  }
+
+  void monitor_t::info_icc_file(wp_image_description_info_v1 *, std::int32_t icc, std::uint32_t) {
+    // We don't use ICC profiles; close the fd so it isn't leaked.
+    if (icc >= 0) {
+      close(icc);
+    }
+  }
+
+  void monitor_t::info_primaries(wp_image_description_info_v1 *, std::int32_t r_x, std::int32_t r_y, std::int32_t g_x, std::int32_t g_y, std::int32_t b_x, std::int32_t b_y, std::int32_t w_x, std::int32_t w_y) {
+    cm_primaries[0] = r_x;
+    cm_primaries[1] = r_y;
+    cm_primaries[2] = g_x;
+    cm_primaries[3] = g_y;
+    cm_primaries[4] = b_x;
+    cm_primaries[5] = b_y;
+    cm_primaries[6] = w_x;
+    cm_primaries[7] = w_y;
+    cm_has_primaries = true;
+  }
+
+  void monitor_t::info_primaries_named(wp_image_description_info_v1 *, std::uint32_t) {
+    // We always have the explicit chromaticities from info_primaries.
+  }
+
+  void monitor_t::info_tf_power(wp_image_description_info_v1 *, std::uint32_t) {
+    // HDR uses the named ST 2084 PQ transfer function, handled in info_tf_named.
+  }
+
+  void monitor_t::info_tf_named(wp_image_description_info_v1 *, std::uint32_t tf) {
+    cm_tf = tf;
+  }
+
+  void monitor_t::info_luminances(wp_image_description_info_v1 *, std::uint32_t min_lum, std::uint32_t max_lum, std::uint32_t) {
+    cm_lum_min = min_lum;
+    cm_lum_max = max_lum;
+  }
+
+  void monitor_t::info_target_primaries(wp_image_description_info_v1 *, std::int32_t r_x, std::int32_t r_y, std::int32_t g_x, std::int32_t g_y, std::int32_t b_x, std::int32_t b_y, std::int32_t w_x, std::int32_t w_y) {
+    cm_target_primaries[0] = r_x;
+    cm_target_primaries[1] = r_y;
+    cm_target_primaries[2] = g_x;
+    cm_target_primaries[3] = g_y;
+    cm_target_primaries[4] = b_x;
+    cm_target_primaries[5] = b_y;
+    cm_target_primaries[6] = w_x;
+    cm_target_primaries[7] = w_y;
+    cm_has_target_primaries = true;
+  }
+
+  void monitor_t::info_target_luminance(wp_image_description_info_v1 *, std::uint32_t min_lum, std::uint32_t max_lum) {
+    cm_target_lum_min = min_lum;
+    cm_target_lum_max = max_lum;
+    cm_has_target_luminance = true;
+  }
+
+  void monitor_t::info_target_max_cll(wp_image_description_info_v1 *, std::uint32_t max_cll) {
+    cm_max_cll = max_cll;
+  }
+
+  void monitor_t::info_target_max_fall(wp_image_description_info_v1 *, std::uint32_t max_fall) {
+    cm_max_fall = max_fall;
+  }
+
+  void monitor_t::info_done(wp_image_description_info_v1 *) {
+    // 'done' is a destructor event: libwayland frees the info proxy for us.
+
+    // We only treat ST 2084 PQ as streamable HDR; that matches what the encoder
+    // pipeline supports (BT.2020 + SMPTE 2084). HLG is reported but unsupported.
+    hdr = (cm_tf == WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST2084_PQ);
+    if (cm_tf == WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_HLG) {
+      BOOST_LOG(warning) << "[wayland] Output uses HLG HDR, which is not supported for streaming; treating as SDR"sv;
+    }
+
+    if (hdr) {
+      // SS_HDR_METADATA expects the mastering-display (target) volume. Prefer the
+      // target primaries/luminances; fall back to the primary color volume when the
+      // compositor omits them (it only sends target_* when they differ).
+      const std::int32_t *p = cm_has_target_primaries ? cm_target_primaries : cm_primaries;
+
+      // Protocol chromaticities are CIE xy * 1,000,000; SS_HDR_METADATA wants
+      // them normalized to 50,000, i.e. value / 20.
+      auto norm = [](std::int32_t v) -> std::uint16_t {
+        long n = static_cast<long>(v) / 20;
+        if (n < 0) {
+          n = 0;
+        }
+        if (n > 65535) {
+          n = 65535;
+        }
+        return static_cast<std::uint16_t>(n);
+      };
+      auto clamp16 = [](std::uint32_t v) -> std::uint16_t {
+        return static_cast<std::uint16_t>(v > 65535 ? 65535 : v);
+      };
+
+      hdr_metadata = {};
+      hdr_metadata.displayPrimaries[0].x = norm(p[0]);
+      hdr_metadata.displayPrimaries[0].y = norm(p[1]);
+      hdr_metadata.displayPrimaries[1].x = norm(p[2]);
+      hdr_metadata.displayPrimaries[1].y = norm(p[3]);
+      hdr_metadata.displayPrimaries[2].x = norm(p[4]);
+      hdr_metadata.displayPrimaries[2].y = norm(p[5]);
+      hdr_metadata.whitePoint.x = norm(p[6]);
+      hdr_metadata.whitePoint.y = norm(p[7]);
+
+      // maxDisplayLuminance is in nits (protocol max_lum is unscaled cd/m²).
+      // minDisplayLuminance is in 1/10000 nit, which matches the protocol's
+      // min_lum scaling (cd/m² * 10000) exactly.
+      std::uint32_t max_lum = cm_has_target_luminance ? cm_target_lum_max : cm_lum_max;
+      std::uint32_t min_lum = cm_has_target_luminance ? cm_target_lum_min : cm_lum_min;
+      hdr_metadata.maxDisplayLuminance = clamp16(max_lum);
+      hdr_metadata.minDisplayLuminance = clamp16(min_lum);
+      hdr_metadata.maxContentLightLevel = clamp16(cm_max_cll);
+      hdr_metadata.maxFrameAverageLightLevel = clamp16(cm_max_fall);
+      hdr_metadata.maxFullFrameLuminance = 0;
+
+      BOOST_LOG(info) << "[wayland] HDR output detected (PQ/ST2084), peak "sv << hdr_metadata.maxDisplayLuminance << " nits"sv;
+    }
+
+    cm_query_complete = true;
+
+    // The image description has been consumed; release it. The output object is
+    // kept so we still receive image_description_changed events.
+    if (cm_image_desc) {
+      wp_image_description_v1_destroy(cm_image_desc);
+      cm_image_desc = nullptr;
+    }
   }
 
   interface_t::interface_t() noexcept
@@ -226,6 +428,13 @@ namespace wl {
       zwp_linux_dmabuf_v1_add_listener(dmabuf_interface, &dmabuf_listener, this);
 
       this->interface[LINUX_DMABUF] = true;
+    } else if (!std::strcmp(interface, wp_color_manager_v1_interface.name)) {
+      BOOST_LOG(info) << "[wayland] Found interface: "sv << interface << '(' << id << ") version "sv << version;
+      // We only rely on v1 events (image description info), but bind up to v2
+      // so v2-only compositors stay compatible (they emit ready2 instead of ready).
+      color_manager = (wp_color_manager_v1 *) wl_registry_bind(registry, id, &wp_color_manager_v1_interface, std::min(version, 2u));
+
+      this->interface[COLOR_MANAGEMENT] = true;
     }
   }
 

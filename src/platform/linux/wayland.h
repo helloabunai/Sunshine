@@ -11,6 +11,7 @@
 #include <vector>
 
 #ifdef SUNSHINE_BUILD_WAYLAND
+  #include <color-management-v1.h>
   #include <linux-dmabuf-unstable-v1.h>
   #include <wlr-screencopy-unstable-v1.h>
   #include <xdg-output-unstable-v1.h>
@@ -127,12 +128,80 @@ namespace wl {
 
     void wl_scale(wl_output *wl_output, std::int32_t factor) {}
 
+    // --- Color management / HDR ---
+
+    /**
+     * @brief Begin an asynchronous query of this output's color/HDR image description.
+     * The caller must perform wl_display roundtrips until `cm_query_complete` is true.
+     * Safe to call with a null manager (HDR simply stays disabled).
+     */
+    void listen_color(wp_color_manager_v1 *color_manager);
+
+    bool is_hdr() const {
+      return cm_query_complete && hdr;
+    }
+
+    /**
+     * @brief Returns true exactly once after the output's image description changed,
+     * signalling that capture should be reinitialized to pick up the new color state.
+     */
+    bool consume_image_description_changed() {
+      bool changed = image_description_changed;
+      image_description_changed = false;
+      return changed;
+    }
+
+    // color-management protocol callbacks
+    void cm_image_description_changed(wp_color_management_output_v1 *);
+    void cm_request_info(wp_image_description_v1 *image_description);
+    void cm_ready(wp_image_description_v1 *image_description, std::uint32_t identity);
+    void cm_ready2(wp_image_description_v1 *image_description, std::uint32_t identity_hi, std::uint32_t identity_lo);
+    void cm_failed(wp_image_description_v1 *image_description, std::uint32_t cause, const char *msg);
+    void info_done(wp_image_description_info_v1 *);
+    void info_icc_file(wp_image_description_info_v1 *, std::int32_t icc, std::uint32_t icc_size);
+    void info_primaries(wp_image_description_info_v1 *, std::int32_t r_x, std::int32_t r_y, std::int32_t g_x, std::int32_t g_y, std::int32_t b_x, std::int32_t b_y, std::int32_t w_x, std::int32_t w_y);
+    void info_primaries_named(wp_image_description_info_v1 *, std::uint32_t primaries);
+    void info_tf_power(wp_image_description_info_v1 *, std::uint32_t eexp);
+    void info_tf_named(wp_image_description_info_v1 *, std::uint32_t tf);
+    void info_luminances(wp_image_description_info_v1 *, std::uint32_t min_lum, std::uint32_t max_lum, std::uint32_t reference_lum);
+    void info_target_primaries(wp_image_description_info_v1 *, std::int32_t r_x, std::int32_t r_y, std::int32_t g_x, std::int32_t g_y, std::int32_t b_x, std::int32_t b_y, std::int32_t w_x, std::int32_t w_y);
+    void info_target_luminance(wp_image_description_info_v1 *, std::uint32_t min_lum, std::uint32_t max_lum);
+    void info_target_max_cll(wp_image_description_info_v1 *, std::uint32_t max_cll);
+    void info_target_max_fall(wp_image_description_info_v1 *, std::uint32_t max_fall);
+
     wl_output *output;
     std::string name;
     std::string description;
     platf::touch_port_t viewport;
     wl_output_listener wl_listener;
     zxdg_output_v1_listener xdg_listener;
+
+    // Color-management state. `hdr_metadata` is valid only when `is_hdr()` is true.
+    wp_color_management_output_v1 *cm_output {nullptr};
+    wp_image_description_v1 *cm_image_desc {nullptr};
+    wp_color_management_output_v1_listener cm_output_listener;
+    wp_image_description_v1_listener cm_image_desc_listener;
+    wp_image_description_info_v1_listener cm_info_listener;
+
+    bool cm_query_complete {false};
+    bool hdr {false};
+    bool image_description_changed {false};
+    SS_HDR_METADATA hdr_metadata {};
+
+    // Accumulators populated while a wp_image_description_info_v1 dump is in flight.
+    // Chromaticities are CIE xy * 1,000,000; luminances follow the protocol scaling.
+    std::uint32_t cm_tf {0};
+    bool cm_has_primaries {false};
+    bool cm_has_target_primaries {false};
+    bool cm_has_target_luminance {false};
+    std::int32_t cm_primaries[8] {};  ///< r_x,r_y,g_x,g_y,b_x,b_y,w_x,w_y
+    std::int32_t cm_target_primaries[8] {};
+    std::uint32_t cm_lum_max {0};  ///< primary color volume max (cd/m²)
+    std::uint32_t cm_lum_min {0};  ///< primary color volume min (cd/m² * 10000)
+    std::uint32_t cm_target_lum_max {0};  ///< target volume max (cd/m²)
+    std::uint32_t cm_target_lum_min {0};  ///< target volume min (cd/m² * 10000)
+    std::uint32_t cm_max_cll {0};
+    std::uint32_t cm_max_fall {0};
   };
 
   class interface_t {
@@ -146,6 +215,7 @@ namespace wl {
       XDG_OUTPUT,  ///< xdg-output
       WLR_EXPORT_DMABUF,  ///< screencopy manager
       LINUX_DMABUF,  ///< linux-dmabuf protocol
+      COLOR_MANAGEMENT,  ///< color-management protocol (HDR metadata)
       MAX_INTERFACES,  ///< Maximum number of interfaces
     };
 
@@ -170,6 +240,7 @@ namespace wl {
     zwlr_screencopy_manager_v1 *screencopy_manager {nullptr};
     zwp_linux_dmabuf_v1 *dmabuf_interface {nullptr};
     zxdg_output_manager_v1 *output_manager {nullptr};
+    wp_color_manager_v1 *color_manager {nullptr};
 
   private:
     void add_interface(wl_registry *registry, std::uint32_t id, const char *interface, std::uint32_t version);
