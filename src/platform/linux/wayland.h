@@ -106,6 +106,7 @@ namespace wl {
   class monitor_t {
   public:
     explicit monitor_t(wl_output *output);
+    ~monitor_t();
 
     monitor_t(monitor_t &&) = delete;
     monitor_t(const monitor_t &) = delete;

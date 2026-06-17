@@ -111,6 +111,10 @@ namespace wl {
         if (hdr) {
           hdr_metadata = monitor->hdr_metadata;
           BOOST_LOG(info) << "[wlgrab] HDR streaming enabled for ["sv << monitor->description << ']';
+        } else if (!monitor->cm_query_complete) {
+          BOOST_LOG(warning) << "[wlgrab] Color image description query did not complete after roundtrips; treating output as SDR"sv;
+        } else {
+          BOOST_LOG(info) << "[wlgrab] Output reported SDR by color-management (transfer function "sv << monitor->cm_tf << ", expected ST2084 PQ = "sv << static_cast<std::uint32_t>(WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST2084_PQ) << "); HDR not enabled"sv;
         }
       } else {
         BOOST_LOG(info) << "[wlgrab] Compositor does not advertise wp_color_manager_v1; HDR capture unavailable"sv;
@@ -296,6 +300,15 @@ namespace wl {
     int init(platf::mem_type_e hwdevice_type, const std::string &display_name, const ::video::config_t &config) {
       if (wlr_t::init(hwdevice_type, display_name, config)) {
         return -1;
+      }
+
+      // The RAM path reads frames back as 8-bit BGRA (see snapshot()), which can't
+      // carry a 10-bit PQ signal. Reporting HDR here would make the encoder select a
+      // 10-bit BT.2020 colorspace for 8-bit pixels, producing a wrong image. HDR
+      // capture is only supported on the VRAM (vaapi/cuda) path.
+      if (hdr) {
+        BOOST_LOG(warning) << "[wlgrab] HDR output detected but software (RAM) capture cannot encode HDR; streaming as SDR. Use a hardware encoder (vaapi/cuda) for HDR."sv;
+        hdr = false;
       }
 
       egl_display = egl::make_display(display.get());

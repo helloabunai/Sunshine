@@ -145,6 +145,21 @@ namespace wl {
       } {
   }
 
+  monitor_t::~monitor_t() {
+    // Release color-management proxies. interface_t (and thus the monitors) is
+    // destroyed before the wl_display in wlr_t, so the connection is still alive
+    // here. cm_image_desc is normally dropped in info_done(), but may survive a
+    // failed/incomplete query.
+    if (cm_image_desc) {
+      wp_image_description_v1_destroy(cm_image_desc);
+      cm_image_desc = nullptr;
+    }
+    if (cm_output) {
+      wp_color_management_output_v1_destroy(cm_output);
+      cm_output = nullptr;
+    }
+  }
+
   inline void monitor_t::xdg_name(zxdg_output_v1 *, const char *name) {
     this->name = name;
 
