@@ -495,6 +495,26 @@ namespace util {
     return from_chars(std::begin(number), std::end(number));
   }
 
+  /**
+   * @brief Check whether a string is a plain (optionally negative) integer.
+   * Used to decide whether a display selector is a numeric index or a name.
+   * Note: from_view()/from_chars() do not validate their input, so callers must
+   * use this before treating a selector as an index.
+   * @param s The string to check.
+   * @return `true` if `s` is non-empty and consists only of digits (with an
+   *         optional leading '-').
+   */
+  inline bool is_integer(const std::string_view &s) {
+    if (s.empty()) {
+      return false;
+    }
+    std::size_t start = (s.front() == '-') ? 1 : 0;
+    if (start == s.size()) {
+      return false;
+    }
+    return s.find_first_not_of("0123456789", start) == std::string_view::npos;
+  }
+
   template<class X, class Y>
   class Either: public std::variant<std::monostate, X, Y> {
   public:

@@ -244,6 +244,48 @@ namespace platf {
       return DRM_MODE_CONNECTOR_Unknown;
     }
 
+    /**
+     * @brief Build the stable connector name for a monitor, e.g. "HDMI-A-1".
+     * The type strings mirror libdrm's drmModeGetConnectorTypeName() so the name
+     * matches what Wayland compositors (e.g. wlroots) report for the same output,
+     * giving a single stable identifier across capture backends. We use our own
+     * table rather than drmModeGetConnectorTypeName() to avoid depending on a
+     * newer libdrm than some supported distros ship.
+     * @param type DRM connector type (DRM_MODE_CONNECTOR_*).
+     * @param index 1-based occurrence of this connector type.
+     * @return The connector name (e.g. "DP-2", "eDP-1").
+     */
+    static std::string connector_name(std::uint32_t type, std::uint32_t index) {
+      std::string_view type_name;
+      switch (type) {
+        case DRM_MODE_CONNECTOR_VGA: type_name = "VGA"sv; break;
+        case DRM_MODE_CONNECTOR_DVII: type_name = "DVI-I"sv; break;
+        case DRM_MODE_CONNECTOR_DVID: type_name = "DVI-D"sv; break;
+        case DRM_MODE_CONNECTOR_DVIA: type_name = "DVI-A"sv; break;
+        case DRM_MODE_CONNECTOR_Composite: type_name = "Composite"sv; break;
+        case DRM_MODE_CONNECTOR_SVIDEO: type_name = "SVIDEO"sv; break;
+        case DRM_MODE_CONNECTOR_LVDS: type_name = "LVDS"sv; break;
+        case DRM_MODE_CONNECTOR_Component: type_name = "Component"sv; break;
+        case DRM_MODE_CONNECTOR_9PinDIN: type_name = "DIN"sv; break;
+        case DRM_MODE_CONNECTOR_DisplayPort: type_name = "DP"sv; break;
+        case DRM_MODE_CONNECTOR_HDMIA: type_name = "HDMI-A"sv; break;
+        case DRM_MODE_CONNECTOR_HDMIB: type_name = "HDMI-B"sv; break;
+        case DRM_MODE_CONNECTOR_TV: type_name = "TV"sv; break;
+        case DRM_MODE_CONNECTOR_eDP: type_name = "eDP"sv; break;
+        case DRM_MODE_CONNECTOR_VIRTUAL: type_name = "Virtual"sv; break;
+        case DRM_MODE_CONNECTOR_DSI: type_name = "DSI"sv; break;
+        case DRM_MODE_CONNECTOR_DPI: type_name = "DPI"sv; break;
+        case DRM_MODE_CONNECTOR_WRITEBACK: type_name = "Writeback"sv; break;
+        case DRM_MODE_CONNECTOR_SPI: type_name = "SPI"sv; break;
+#ifdef DRM_MODE_CONNECTOR_USB
+        case DRM_MODE_CONNECTOR_USB: type_name = "USB"sv; break;
+#endif
+        default: type_name = "Unknown"sv; break;
+      }
+
+      return std::string {type_name} + '-' + std::to_string(index);
+    }
+
     class plane_it_t: public round_robin_util::it_wrap_t<plane_t::element_type, plane_it_t> {
     public:
       plane_it_t(int fd, std::uint32_t *plane_p, std::uint32_t *end):
@@ -611,6 +653,9 @@ namespace platf {
       int init(const std::string &display_name, const ::video::config_t &config) {
         delay = std::chrono::nanoseconds {1s} / config.framerate;
 
+        // Select by stable connector name (e.g. "HDMI-A-1") when the selector
+        // isn't a plain integer; otherwise fall back to the legacy numeric index.
+        bool by_name = !display_name.empty() && !util::is_integer(display_name);
         int monitor_index = util::from_view(display_name);
         int monitor = 0;
 
@@ -645,6 +690,10 @@ namespace platf {
             continue;
           }
 
+          // Map each CRTC to its connector so we can resolve stable names.
+          kms::conn_type_count_t name_conn_type_count;
+          auto crtc_to_monitor = kms::map_crtc_to_monitor(card.monitors(name_conn_type_count));
+
           auto end = std::end(card);
           for (auto plane = std::begin(card); plane != end; ++plane) {
             // Skip unused planes
@@ -656,7 +705,15 @@ namespace platf {
               continue;
             }
 
-            if (monitor != monitor_index) {
+            // Resolve this plane's stable connector name (e.g. "HDMI-A-1").
+            std::string name;
+            auto mit = crtc_to_monitor.find(plane->crtc_id);
+            if (mit != std::end(crtc_to_monitor)) {
+              name = kms::connector_name(mit->second.type, mit->second.index);
+            }
+
+            bool selected = by_name ? (name == display_name) : (monitor == monitor_index);
+            if (!selected) {
               ++monitor;
               continue;
             }
@@ -777,7 +834,11 @@ namespace platf {
           }
         }
 
-        BOOST_LOG(error) << "Couldn't find monitor ["sv << monitor_index << ']';
+        if (by_name) {
+          BOOST_LOG(error) << "Couldn't find monitor ["sv << display_name << ']';
+        } else {
+          BOOST_LOG(error) << "Couldn't find monitor ["sv << monitor_index << ']';
+        }
         return -1;
 
       // Neatly break from nested for loop
@@ -1699,6 +1760,7 @@ namespace platf {
           continue;
         }
 
+        std::string name;
         auto it = crtc_to_monitor.find(plane->crtc_id);
         if (it != std::end(crtc_to_monitor)) {
           it->second.viewport = platf::touch_port_t {
@@ -1708,6 +1770,7 @@ namespace platf {
             (int) crtc->height,
           };
           it->second.monitor_index = count;
+          name = kms::connector_name(it->second.type, it->second.index);
         }
 
         kms::env_width = std::max(kms::env_width, (int) (crtc->x + crtc->width));
@@ -1715,7 +1778,9 @@ namespace platf {
 
         kms::print(plane.get(), fb.get(), crtc.get());
 
-        display_names.emplace_back(std::to_string(count++));
+        // Expose the stable connector name (falling back to the index if unknown).
+        display_names.emplace_back(name.empty() ? std::to_string(count) : name);
+        ++count;
       }
 
       cds.emplace_back(kms::card_descriptor_t {

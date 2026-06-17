@@ -719,12 +719,26 @@ namespace cuda {
         int streamedMonitor = -1;
         if (!display_name.empty()) {
           if (status_params->bXRandRAvailable) {
-            auto monitor_nr = util::from_view(display_name);
-
-            if (monitor_nr < 0 || monitor_nr >= status_params->dwOutputNum) {
-              BOOST_LOG(warning) << "Can't stream monitor ["sv << monitor_nr << "], it needs to be between [0] and ["sv << status_params->dwOutputNum - 1 << "], defaulting to virtual desktop"sv;
+            // Select by stable output name (e.g. "DP-1") when the selector isn't
+            // a plain integer; otherwise fall back to the legacy numeric index.
+            if (!util::is_integer(display_name)) {
+              for (auto x = 0; x < status_params->dwOutputNum; ++x) {
+                if (display_name == status_params->outputs[x].name) {
+                  streamedMonitor = x;
+                  break;
+                }
+              }
+              if (streamedMonitor == -1) {
+                BOOST_LOG(warning) << "Can't find monitor ["sv << display_name << "], defaulting to virtual desktop"sv;
+              }
             } else {
-              streamedMonitor = monitor_nr;
+              auto monitor_nr = util::from_view(display_name);
+
+              if (monitor_nr < 0 || monitor_nr >= status_params->dwOutputNum) {
+                BOOST_LOG(warning) << "Can't stream monitor ["sv << monitor_nr << "], it needs to be between [0] and ["sv << status_params->dwOutputNum - 1 << "], defaulting to virtual desktop"sv;
+              } else {
+                streamedMonitor = monitor_nr;
+              }
             }
           } else {
             BOOST_LOG(warning) << "XrandR not available, streaming entire virtual desktop"sv;
@@ -1017,7 +1031,8 @@ namespace platf {
       BOOST_LOG(debug) << "  Name: "sv << output.name;
       BOOST_LOG(info) << "  Resolution: "sv << output.trackedBox.w << 'x' << output.trackedBox.h;
       BOOST_LOG(info) << "  Offset: "sv << output.trackedBox.x << 'x' << output.trackedBox.y;
-      display_names.emplace_back(std::to_string(x));
+      // Expose the stable output name (falling back to the index if empty).
+      display_names.emplace_back(output.name[0] ? std::string {output.name} : std::to_string(x));
     }
 
     return display_names;

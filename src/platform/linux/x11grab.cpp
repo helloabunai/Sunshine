@@ -397,13 +397,20 @@ namespace platf {
 
       refresh();
 
+      // Select by stable RandR output name (e.g. "DP-1") when the selector isn't
+      // a plain integer; otherwise fall back to the legacy numeric index.
+      bool by_name = !display_name.empty() && !util::is_integer(display_name);
       int streamedMonitor = -1;
-      if (!display_name.empty()) {
+      if (!display_name.empty() && !by_name) {
         streamedMonitor = (int) util::from_view(display_name);
       }
 
-      if (streamedMonitor != -1) {
-        BOOST_LOG(info) << "Configuring selected display ("sv << streamedMonitor << ") to stream"sv;
+      if (by_name || streamedMonitor != -1) {
+        if (by_name) {
+          BOOST_LOG(info) << "Configuring selected display ("sv << display_name << ") to stream"sv;
+        } else {
+          BOOST_LOG(info) << "Configuring selected display ("sv << streamedMonitor << ") to stream"sv;
+        }
         screen_res_t screenr {x11::rr::GetScreenResources(xdisplay.get(), xwindow)};
         int output = screenr->noutput;
 
@@ -412,15 +419,22 @@ namespace platf {
         for (int x = 0; x < output; ++x) {
           output_info_t out_info {x11::rr::GetOutputInfo(xdisplay.get(), screenr.get(), screenr->outputs[x])};
           if (out_info) {
-            if (monitor++ == streamedMonitor) {
+            std::string name {out_info->name, static_cast<std::size_t>(out_info->nameLen)};
+            bool selected = by_name ? (name == display_name) : (monitor == streamedMonitor);
+            if (selected) {
               result = std::move(out_info);
               break;
             }
+            ++monitor;
           }
         }
 
         if (!result) {
-          BOOST_LOG(error) << "Could not stream display number ["sv << streamedMonitor << "], there are only ["sv << monitor << "] displays."sv;
+          if (by_name) {
+            BOOST_LOG(error) << "Could not find display ["sv << display_name << "] among ["sv << monitor << "] displays."sv;
+          } else {
+            BOOST_LOG(error) << "Could not stream display number ["sv << streamedMonitor << "], there are only ["sv << monitor << "] displays."sv;
+          }
           return -1;
         }
 
@@ -781,20 +795,17 @@ namespace platf {
     screen_res_t screenr {x11::rr::GetScreenResources(xdisplay.get(), xwindow)};
     int output = screenr->noutput;
 
+    std::vector<std::string> names;
+
     int monitor = 0;
     for (int x = 0; x < output; ++x) {
       output_info_t out_info {x11::rr::GetOutputInfo(xdisplay.get(), screenr.get(), screenr->outputs[x])};
       if (out_info) {
-        BOOST_LOG(info) << "Detected display: "sv << out_info->name << " (id: "sv << monitor << ")"sv << out_info->name << " connected: "sv << (out_info->connection == RR_Connected);
+        std::string name {out_info->name, static_cast<std::size_t>(out_info->nameLen)};
+        BOOST_LOG(info) << "Detected display: "sv << name << " (id: "sv << monitor << ") connected: "sv << (out_info->connection == RR_Connected);
+        names.emplace_back(std::move(name));
         ++monitor;
       }
-    }
-
-    std::vector<std::string> names;
-    names.reserve(monitor);
-
-    for (auto x = 0; x < monitor; ++x) {
-      names.emplace_back(std::to_string(x));
     }
 
     return names;
